@@ -1,0 +1,228 @@
+/**
+ * @file PatternClassifier.cpp
+ * @brief Implementación del clasificador de patrones
+ */
+
+#include "utec/apps/PatternClassifier.h"
+#include <random>
+#include <cmath>
+#include <algorithm>
+#include <iostream>
+
+namespace utec::apps {
+
+PatternClassifier::PatternClassifier() {
+    // Construir la red neuronal
+    // Input: 4 features, Hidden: 16 neurons (ReLU), Output: 3 classes (Softmax)
+    network_.add_dense_layer(INPUT_FEATURES, 16, std::make_shared<nn::ReLU>());
+    network_.add_dense_layer(16, OUTPUT_CLASSES, std::make_shared<nn::Softmax>());
+}
+
+std::pair<nn::Tensor2D, nn::Tensor2D> PatternClassifier::generate_training_data(size_t num_samples) {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    
+    size_t samples_per_class = num_samples / 3;
+    nn::Tensor2D inputs({num_samples, INPUT_FEATURES});
+    nn::Tensor2D targets({num_samples, OUTPUT_CLASSES});
+    
+    targets.fill(0.0f);
+    
+    // Generar muestras de círculos
+    for (size_t i = 0; i < samples_per_class; ++i) {
+        auto sample = generate_circle_sample();
+        for (size_t j = 0; j < INPUT_FEATURES; ++j) {
+            inputs(i, j) = sample(0, j);
+        }
+        targets(i, 0) = 1.0f;  // Clase círculo
+    }
+    
+    // Generar muestras de cuadrados
+    for (size_t i = 0; i < samples_per_class; ++i) {
+        auto sample = generate_square_sample();
+        for (size_t j = 0; j < INPUT_FEATURES; ++j) {
+            inputs(samples_per_class + i, j) = sample(0, j);
+        }
+        targets(samples_per_class + i, 1) = 1.0f;  // Clase cuadrado
+    }
+    
+    // Generar muestras de triángulos
+    for (size_t i = 0; i < samples_per_class; ++i) {
+        auto sample = generate_triangle_sample();
+        for (size_t j = 0; j < INPUT_FEATURES; ++j) {
+            inputs(2 * samples_per_class + i, j) = sample(0, j);
+        }
+        targets(2 * samples_per_class + i, 2) = 1.0f;  // Clase triángulo
+    }
+    
+    return {inputs, targets};
+}
+
+void PatternClassifier::train(size_t epochs, size_t batch_size, float learning_rate) {
+    auto [train_inputs, train_targets] = generate_training_data(1000);
+    
+    auto loss = std::make_unique<nn::CrossEntropy>();
+    auto optimizer = std::make_unique<nn::Adam>(learning_rate);
+    
+    std::cout << "Entrenando clasificador de patrones..." << std::endl;
+    
+    for (size_t epoch = 0; epoch < epochs; ++epoch) {
+        float epoch_loss = 0.0f;
+        size_t num_batches = train_inputs.shape()[0] / batch_size;
+        
+        for (size_t batch = 0; batch < num_batches; ++batch) {
+            size_t start_idx = batch * batch_size;
+            
+            // Extraer lote
+            nn::Tensor2D batch_input({batch_size, INPUT_FEATURES});
+            nn::Tensor2D batch_target({batch_size, OUTPUT_CLASSES});
+            
+            for (size_t i = 0; i < batch_size; ++i) {
+                for (size_t j = 0; j < INPUT_FEATURES; ++j) {
+                    batch_input(i, j) = train_inputs(start_idx + i, j);
+                }
+                for (size_t j = 0; j < OUTPUT_CLASSES; ++j) {
+                    batch_target(i, j) = train_targets(start_idx + i, j);
+                }
+            }
+            
+            // Forward y backward
+            float batch_loss = network_.train_step(batch_input, batch_target, *loss, *optimizer);
+            epoch_loss += batch_loss;
+        }
+        
+        if ((epoch + 1) % 10 == 0) {
+            std::cout << "Epoch " << (epoch + 1) << "/" << epochs 
+                      << " - Loss: " << (epoch_loss / num_batches) << std::endl;
+        }
+    }
+}
+
+PatternClassifier::Pattern PatternClassifier::classify(const nn::Tensor2D& input) {
+    auto output = network_.forward(input);
+    
+    // Encontrar la clase con mayor probabilidad
+    float max_prob = output(0, 0);
+    int best_class = 0;
+    
+    for (size_t i = 1; i < OUTPUT_CLASSES; ++i) {
+        if (output(0, i) > max_prob) {
+            max_prob = output(0, i);
+            best_class = i;
+        }
+    }
+    
+    return static_cast<Pattern>(best_class);
+}
+
+float PatternClassifier::get_confidence(const nn::Tensor2D& input) {
+    auto output = network_.forward(input);
+    
+    float max_prob = output(0, 0);
+    for (size_t i = 1; i < OUTPUT_CLASSES; ++i) {
+        if (output(0, i) > max_prob) {
+            max_prob = output(0, i);
+        }
+    }
+    
+    return max_prob;
+}
+
+float PatternClassifier::evaluate(const nn::Tensor2D& test_inputs, const nn::Tensor2D& test_targets) {
+    size_t correct = 0;
+    size_t total = test_inputs.shape()[0];
+    
+    for (size_t i = 0; i < total; ++i) {
+        nn::Tensor2D sample({1, INPUT_FEATURES});
+        for (size_t j = 0; j < INPUT_FEATURES; ++j) {
+            sample(0, j) = test_inputs(i, j);
+        }
+        
+        Pattern predicted = classify(sample);
+        
+        // Encontrar la clase verdadera
+        int true_class = 0;
+        for (size_t j = 0; j < OUTPUT_CLASSES; ++j) {
+            if (test_targets(i, j) > 0.5f) {
+                true_class = j;
+                break;
+            }
+        }
+        
+        if (static_cast<int>(predicted) == true_class) {
+            correct++;
+        }
+    }
+    
+    return static_cast<float>(correct) / total;
+}
+
+void PatternClassifier::save_model(const std::string& filename) {
+    network_.save(filename);
+}
+
+void PatternClassifier::load_model(const std::string& filename) {
+    network_.load(filename);
+}
+
+nn::Tensor2D PatternClassifier::generate_circle_sample() const {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<> dis(0.8f, 1.2f);
+    
+    float radius = dis(gen);
+    float perimeter = 2 * M_PI * radius;
+    float area = M_PI * radius * radius;
+    float compactness = (perimeter * perimeter) / (4 * M_PI * area);
+    float aspect_ratio = 1.0f;
+    
+    nn::Tensor2D sample({1, INPUT_FEATURES});
+    sample(0, 0) = area;
+    sample(0, 1) = perimeter;
+    sample(0, 2) = compactness;
+    sample(0, 3) = aspect_ratio;
+    
+    return sample;
+}
+
+nn::Tensor2D PatternClassifier::generate_square_sample() const {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<> dis(0.8f, 1.2f);
+    
+    float side = dis(gen);
+    float perimeter = 4 * side;
+    float area = side * side;
+    float compactness = (perimeter * perimeter) / (4 * M_PI * area);
+    float aspect_ratio = 1.0f;
+    
+    nn::Tensor2D sample({1, INPUT_FEATURES});
+    sample(0, 0) = area;
+    sample(0, 1) = perimeter;
+    sample(0, 2) = compactness;
+    sample(0, 3) = aspect_ratio;
+    
+    return sample;
+}
+
+nn::Tensor2D PatternClassifier::generate_triangle_sample() const {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<> dis(0.8f, 1.2f);
+    
+    float side = dis(gen);
+    float perimeter = 3 * side;
+    float area = (std::sqrt(3) / 4) * side * side;
+    float compactness = (perimeter * perimeter) / (4 * M_PI * area);
+    float aspect_ratio = 1.0f;
+    
+    nn::Tensor2D sample({1, INPUT_FEATURES});
+    sample(0, 0) = area;
+    sample(0, 1) = perimeter;
+    sample(0, 2) = compactness;
+    sample(0, 3) = aspect_ratio;
+    
+    return sample;
+}
+
+} // namespace utec::apps

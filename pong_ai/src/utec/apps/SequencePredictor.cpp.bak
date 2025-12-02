@@ -1,0 +1,129 @@
+/**
+ * @file SequencePredictor.cpp
+ * @brief Implementación del predictor de series numéricas
+ */
+
+#include "utec/apps/SequencePredictor.h"
+#include <cmath>
+#include <algorithm>
+#include <iostream>
+#include <random>
+
+namespace utec::apps {
+
+SequencePredictor::SequencePredictor() {
+    // Construir la red neuronal
+    // Input: window_size features, Hidden: 32 neurons (ReLU), Output: 1 (Linear)
+    network_.add_dense_layer(5, HIDDEN_UNITS, std::make_shared<nn::ReLU>());
+    network_.add_dense_layer(HIDDEN_UNITS, 1, std::make_shared<nn::Linear>());
+}
+
+std::vector<float> SequencePredictor::generate_sequence(size_t length, int sequence_type) {
+    std::vector<float> sequence;
+    
+    switch (sequence_type) {
+        case 0: {  // Lineal: y = 2x + 1
+            for (size_t i = 0; i < length; ++i) {
+                sequence.push_back(2.0f * i + 1.0f);
+            }
+            break;
+        }
+        case 1: {  // Cuadrática: y = x^2
+            for (size_t i = 0; i < length; ++i) {
+                sequence.push_back(static_cast<float>(i * i));
+            }
+            break;
+        }
+        case 2: {  // Senoidal: y = sin(x)
+            for (size_t i = 0; i < length; ++i) {
+                sequence.push_back(std::sin(2.0f * M_PI * i / 20.0f));
+            }
+            break;
+        }
+        default:
+            sequence.resize(length, 0.0f);
+    }
+    
+    return sequence;
+}
+
+std::pair<nn::Tensor2D, nn::Tensor2D> SequencePredictor::prepare_training_data(
+    const std::vector<float>& sequence, size_t window_size) {
+    
+    size_t num_samples = sequence.size() - window_size;
+    nn::Tensor2D inputs({num_samples, window_size});
+    nn::Tensor2D targets({num_samples, 1});
+    
+    for (size_t i = 0; i < num_samples; ++i) {
+        // Entrada: window_size valores anteriores
+        for (size_t j = 0; j < window_size; ++j) {
+            inputs(i, j) = sequence[i + j];
+        }
+        // Objetivo: siguiente valor
+        targets(i, 0) = sequence[i + window_size];
+    }
+    
+    return {inputs, targets};
+}
+
+void SequencePredictor::train(const std::vector<float>& sequence, size_t epochs,
+                              size_t window_size, float learning_rate) {
+    auto [train_inputs, train_targets] = prepare_training_data(sequence, window_size);
+    
+    auto loss = std::make_unique<nn::MeanSquaredError>();
+    auto optimizer = std::make_unique<nn::Adam>(learning_rate);
+    
+    std::cout << "Entrenando predictor de series..." << std::endl;
+    
+    for (size_t epoch = 0; epoch < epochs; ++epoch) {
+        float epoch_loss = network_.train_step(train_inputs, train_targets, *loss, *optimizer);
+        
+        if ((epoch + 1) % 10 == 0) {
+            std::cout << "Epoch " << (epoch + 1) << "/" << epochs 
+                      << " - Loss: " << epoch_loss << std::endl;
+        }
+    }
+}
+
+float SequencePredictor::predict_next(const nn::Tensor2D& history) {
+    auto output = network_.forward(history);
+    return output(0, 0);
+}
+
+std::vector<float> SequencePredictor::predict_ahead(const nn::Tensor2D& history, size_t steps) {
+    std::vector<float> predictions;
+    nn::Tensor2D current_history = history;
+    
+    for (size_t i = 0; i < steps; ++i) {
+        float next_value = predict_next(current_history);
+        predictions.push_back(next_value);
+        
+        // Actualizar el historial para la siguiente predicción
+        // Desplazar los valores y añadir la nueva predicción
+        nn::Tensor2D new_history({1, current_history.shape()[1]});
+        for (size_t j = 1; j < current_history.shape()[1]; ++j) {
+            new_history(0, j - 1) = current_history(0, j);
+        }
+        new_history(0, current_history.shape()[1] - 1) = next_value;
+        current_history = new_history;
+    }
+    
+    return predictions;
+}
+
+float SequencePredictor::evaluate(const std::vector<float>& test_sequence, size_t window_size) {
+    auto [test_inputs, test_targets] = prepare_training_data(test_sequence, window_size);
+    
+    auto loss = std::make_unique<nn::MeanSquaredError>();
+    return network_.evaluate(test_inputs, test_targets, *loss);
+}
+
+void SequencePredictor::save_model(const std::string& filename) {
+    network_.save(filename);
+}
+
+void SequencePredictor::load_model(const std::string& filename) {
+    network_.load(filename);
+}
+
+} // namespace utec::apps

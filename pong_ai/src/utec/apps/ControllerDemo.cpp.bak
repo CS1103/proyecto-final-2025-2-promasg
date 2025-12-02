@@ -1,0 +1,235 @@
+/**
+ * @file ControllerDemo.cpp
+ * @brief Implementación del controlador de sistema
+ */
+
+#include "utec/apps/ControllerDemo.h"
+#include <cmath>
+#include <algorithm>
+#include <iostream>
+#include <random>
+
+namespace utec::apps {
+
+ControllerDemo::ControllerDemo() {
+    // Construir la red neuronal
+    // Input: 4 features (position, velocity, target, time), 
+    // Hidden: 16 neurons (ReLU), Output: 5 actions (Softmax)
+    network_.add_dense_layer(STATE_FEATURES, 16, std::make_shared<nn::ReLU>());
+    network_.add_dense_layer(16, NUM_ACTIONS, std::make_shared<nn::Softmax>());
+}
+
+std::pair<nn::Tensor2D, nn::Tensor2D> ControllerDemo::generate_training_data(
+    size_t num_episodes, size_t steps_per_episode) {
+    
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<> dis(-1.0f, 1.0f);
+    
+    size_t total_samples = num_episodes * steps_per_episode;
+    nn::Tensor2D states({total_samples, STATE_FEATURES});
+    nn::Tensor2D actions({total_samples, NUM_ACTIONS});
+    
+    actions.fill(0.0f);
+    
+    size_t sample_idx = 0;
+    
+    for (size_t episode = 0; episode < num_episodes; ++episode) {
+        SystemState state;
+        state.position = dis(gen);
+        state.velocity = 0.0f;
+        state.target_pos = dis(gen);
+        
+        for (size_t step = 0; step < steps_per_episode; ++step) {
+            state.time_step = static_cast<float>(step) / steps_per_episode;
+            
+            // Guardar estado
+            states(sample_idx, 0) = state.position;
+            states(sample_idx, 1) = state.velocity;
+            states(sample_idx, 2) = state.target_pos;
+            states(sample_idx, 3) = state.time_step;
+            
+            // Decidir acción óptima (simple heurística)
+            float error = state.target_pos - state.position;
+            Action optimal_action;
+            
+            if (std::abs(error) < 0.1f) {
+                optimal_action = Action::STAY;
+            } else if (error > 0) {
+                optimal_action = Action::MOVE_RIGHT;
+            } else {
+                optimal_action = Action::MOVE_LEFT;
+            }
+            
+            actions(sample_idx, static_cast<int>(optimal_action)) = 1.0f;
+            
+            // Aplicar acción y actualizar estado
+            state = apply_action(state, optimal_action);
+            
+            sample_idx++;
+        }
+    }
+    
+    return {states, actions};
+}
+
+void ControllerDemo::train(size_t epochs, size_t batch_size, float learning_rate) {
+    auto [train_states, train_actions] = generate_training_data(50, 20);
+    
+    auto loss = std::make_unique<nn::CrossEntropy>();
+    auto optimizer = std::make_unique<nn::Adam>(learning_rate);
+    
+    std::cout << "Entrenando controlador..." << std::endl;
+    
+    for (size_t epoch = 0; epoch < epochs; ++epoch) {
+        float epoch_loss = 0.0f;
+        size_t num_batches = train_states.shape()[0] / batch_size;
+        
+        for (size_t batch = 0; batch < num_batches; ++batch) {
+            size_t start_idx = batch * batch_size;
+            
+            // Extraer lote
+            nn::Tensor2D batch_states({batch_size, STATE_FEATURES});
+            nn::Tensor2D batch_actions({batch_size, NUM_ACTIONS});
+            
+            for (size_t i = 0; i < batch_size; ++i) {
+                for (size_t j = 0; j < STATE_FEATURES; ++j) {
+                    batch_states(i, j) = train_states(start_idx + i, j);
+                }
+                for (size_t j = 0; j < NUM_ACTIONS; ++j) {
+                    batch_actions(i, j) = train_actions(start_idx + i, j);
+                }
+            }
+            
+            // Forward y backward
+            float batch_loss = network_.train_step(batch_states, batch_actions, *loss, *optimizer);
+            epoch_loss += batch_loss;
+        }
+        
+        if ((epoch + 1) % 10 == 0) {
+            std::cout << "Epoch " << (epoch + 1) << "/" << epochs 
+                      << " - Loss: " << (epoch_loss / num_batches) << std::endl;
+        }
+    }
+}
+
+ControllerDemo::Action ControllerDemo::decide_action(const SystemState& state) {
+    auto state_tensor = state_to_tensor(state);
+    auto output = network_.forward(state_tensor);
+    
+    // Encontrar la acción con mayor probabilidad
+    float max_prob = output(0, 0);
+    int best_action = 0;
+    
+    for (size_t i = 1; i < NUM_ACTIONS; ++i) {
+        if (output(0, i) > max_prob) {
+            max_prob = output(0, i);
+            best_action = i;
+        }
+    }
+    
+    return static_cast<Action>(best_action);
+}
+
+float ControllerDemo::get_action_confidence(const SystemState& state) {
+    auto state_tensor = state_to_tensor(state);
+    auto output = network_.forward(state_tensor);
+    
+    float max_prob = output(0, 0);
+    for (size_t i = 1; i < NUM_ACTIONS; ++i) {
+        if (output(0, i) > max_prob) {
+            max_prob = output(0, i);
+        }
+    }
+    
+    return max_prob;
+}
+
+ControllerDemo::SimulationResult ControllerDemo::simulate(size_t num_steps, float target_position) {
+    SimulationResult result;
+    
+    SystemState state;
+    state.position = 0.0f;
+    state.velocity = 0.0f;
+    state.target_pos = target_position;
+    
+    for (size_t step = 0; step < num_steps; ++step) {
+        state.time_step = static_cast<float>(step) / num_steps;
+        
+        result.positions.push_back(state.position);
+        result.velocities.push_back(state.velocity);
+        
+        Action action = decide_action(state);
+        result.actions.push_back(static_cast<int>(action));
+        
+        state = apply_action(state, action);
+    }
+    
+    result.final_error = std::abs(state.position - target_position);
+    return result;
+}
+
+float ControllerDemo::evaluate(size_t num_simulations, size_t num_steps) {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<> dis(-1.0f, 1.0f);
+    
+    float total_error = 0.0f;
+    
+    for (size_t sim = 0; sim < num_simulations; ++sim) {
+        float target = dis(gen);
+        auto result = simulate(num_steps, target);
+        total_error += result.final_error;
+    }
+    
+    return total_error / num_simulations;
+}
+
+void ControllerDemo::save_model(const std::string& filename) {
+    network_.save(filename);
+}
+
+void ControllerDemo::load_model(const std::string& filename) {
+    network_.load(filename);
+}
+
+nn::Tensor2D ControllerDemo::state_to_tensor(const SystemState& state) {
+    nn::Tensor2D tensor({1, STATE_FEATURES});
+    tensor(0, 0) = state.position;
+    tensor(0, 1) = state.velocity;
+    tensor(0, 2) = state.target_pos;
+    tensor(0, 3) = state.time_step;
+    return tensor;
+}
+
+ControllerDemo::SystemState ControllerDemo::apply_action(const SystemState& state, Action action) {
+    SystemState new_state = state;
+    
+    switch (action) {
+        case Action::MOVE_LEFT:
+            new_state.position -= 0.1f;
+            break;
+        case Action::STAY:
+            // No cambiar posición
+            break;
+        case Action::MOVE_RIGHT:
+            new_state.position += 0.1f;
+            break;
+        case Action::ACCELERATE:
+            new_state.velocity += 0.05f;
+            new_state.position += new_state.velocity;
+            break;
+        case Action::DECELERATE:
+            new_state.velocity -= 0.05f;
+            new_state.position += new_state.velocity;
+            break;
+    }
+    
+    // Limitar posición y velocidad
+    new_state.position = std::clamp(new_state.position, -1.0f, 1.0f);
+    new_state.velocity = std::clamp(new_state.velocity, -1.0f, 1.0f);
+    
+    return new_state;
+}
+
+} // namespace utec::apps
